@@ -232,41 +232,52 @@ func rawHook(address: UnsafeMutableRawPointer, code: UnsafePointer<UInt8>?, size
     if enforceThreadSafety {
         stopAllThreads()
     }
+    defer {
+        if enforceThreadSafety {
+            resumeAllThreads()
+        }
+    }
     
-    let goodSize = Int(size)
-    let machAddr = mach_vm_address_t(UInt(bitPattern: address))
+    let JBHookMemory_c = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "JBHookMemory")
+    if (JBHookMemory_c != nil) {
+        typealias JBHookMemory_type = @convention(c) (UnsafeRawPointer, UnsafeRawPointer, CUnsignedLongLong) -> CInt
+        let JBHookMemory = unsafeBitCast(JBHookMemory_c, to: JBHookMemory_type.self)
+        let krt1 = JBHookMemory(address, code!, size)
+        guard krt1 == KERN_SUCCESS else {
+            return Int(krt1)
+        }
+    }
+    else {
+        let goodSize = Int(size)
+        let machAddr = mach_vm_address_t(UInt(bitPattern: address))
+                
+        let krt1 = custom_mach_vm_protect(
+            mach_task_self_,
+            machAddr,
+            size,
+            0,
+            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
+        )
             
-    let krt1 = custom_mach_vm_protect(
-        mach_task_self_,
-        machAddr,
-        size,
-        0,
-        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
-    )
-        
-    guard krt1 == KERN_SUCCESS else {
-        return Int(krt1)
+        guard krt1 == KERN_SUCCESS else {
+            return Int(krt1)
+        }
+
+        manual_memcpy(address, code, goodSize)
+            
+        let err2 = custom_mach_vm_protect(
+            mach_task_self_,
+            machAddr,
+            size,
+            0,
+            VM_PROT_READ | VM_PROT_EXECUTE
+        )
+
+        // flush page cache so we don't hit cached unpatched functions
+        sys_icache_invalidate(address, Int(vm_page_size))
+        guard err2 == KERN_SUCCESS else {
+            return Int(err2)
+        }
     }
-
-    manual_memcpy(address, code, goodSize)
-        
-    let err2 = custom_mach_vm_protect(
-        mach_task_self_,
-        machAddr,
-        size,
-        0,
-        VM_PROT_READ | VM_PROT_EXECUTE
-    )
-
-    // flush page cache so we don't hit cached unpatched functions
-    sys_icache_invalidate(address, Int(vm_page_size))
-
-    guard err2 == KERN_SUCCESS else {
-        return Int(err2)
-    }
-    if enforceThreadSafety {
-        resumeAllThreads()
-    }
-
     return 0
 }
